@@ -1,0 +1,94 @@
+- name: install RHCS
+  hosts: all
+  remote_user: root
+  tasks:
+    - name: Subscribe to pool with RHCS
+      tags: [rhsm]
+      redhat_subscription:
+        state: present
+        server_hostname: https://subscription.rhn.redhat.com:443/subscription/
+        username: "{{ RHN_USER }}"
+        password: "{{ RHN_PASS }}"
+        force_register: True
+        rhsm_baseurl: https://cdn.redhat.com
+        # Employee SKU
+        pool_ids: 8a85f99c7d76f2fd017d96c345750657
+    - name: Enable only the repos we need
+      tags: [rhsm]
+      rhsm_repository:
+        purge: yes
+        name:
+          - ansible-2.9-for-rhel-8-x86_64-rpms
+          - rhceph-5-tools-for-rhel-8-x86_64-rpms
+          - rhel-8-for-x86_64-appstream-rpms
+          - rhel-8-for-x86_64-baseos-rpms
+    - name: Revert RHSM IBM voodoo
+      tags: [rhsm]
+      copy:
+        dest: /etc/rhsm/rhsm.conf
+        content: |
+          [server]
+          hostname = subscription.rhsm.redhat.com
+          prefix = /subscription
+          port = 443
+          insecure = 0
+          proxy_hostname =
+          proxy_scheme = http
+          proxy_port =
+          proxy_user =
+          proxy_password =
+          no_proxy =
+          [rhsm]
+          baseurl = https://cdn.redhat.com
+          repomd_gpg_url =
+          ca_cert_dir = /etc/rhsm/ca/
+          repo_ca_cert = %(ca_cert_dir)sredhat-uep.pem
+          productCertDir = /etc/pki/product
+          entitlementCertDir = /etc/pki/entitlement
+          consumerCertDir = /etc/pki/consumer
+          manage_repos = 1
+          full_refresh_on_yum = 0
+          report_package_profile = 1
+          pluginDir = /usr/share/rhsm-plugins
+          pluginConfDir = /etc/rhsm/pluginconf.d
+          auto_enable_yum_plugins = 1
+          package_profile_on_trans = 0
+          inotify = 1
+          [rhsmcertd]
+          certCheckInterval = 240
+          autoAttachInterval = 1440
+          splay = 1
+          disable = 0
+          auto_registration = 0
+          auto_registration_interval = 60
+          [logging]
+          default_log_level = INFO
+    - name: Install cephadm-ansible
+      dnf:
+        name: cephadm-ansible
+        state: latest
+    - name: Prepare host for cephadm
+      shell:
+        cmd: 'ansible-playbook -i "localhost," cephadm-preflight.yml --extra-vars "ceph_origin=rhcs" --connection=local'
+        chdir: /usr/share/cephadm-ansible
+    - name: Bootstrap Ceph cluster
+      shell:
+        cmd: "cephadm bootstrap --mon-ip {{ ansible_default_ipv4.address }} --registry-url registry.redhat.io --registry-username {{ RHN_USER }} --registry-password {{ RHN_PASS }}"
+      delegate_to: "{{ play_hosts | first }}"
+    - name: Make all hosts an admin node
+      shell: "ceph orch host ls -f plain | tail -n+2 | cut -d ' ' -f1 | xargs -n1 -t -I {} ceph orch host label add {} _admin"
+    - name: Identify all disks on all hosts
+      shell: ceph orch device ls -f json
+      tags: testing
+      register: osd_candidates_output
+    - name: Filter too small devices
+      tags: testing
+      ansible.builtin.set_fact:
+        osd_candidates: "{{(osd_candidates_output['stdout'] | from_json) | json_query(select_localhost) }}"
+      vars:
+        select_localhost: "[?addr=='{{ansible_hostname}}'] | [].devices[?sys_api.size>=`5000000000`][].[path][]"
+    - name: Add OSDs
+      tags: testing
+      shell:
+        cmd: "ceph orch daemon add osd {{ansible_hostname}}:{{item}}"
+      loop: "{{osd_candidates}}"
