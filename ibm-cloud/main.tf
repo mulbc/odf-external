@@ -14,28 +14,36 @@ provider "ibm" {
   iaas_classic_username = var.api_user
 }
 
-resource "ibm_compute_ssh_key" "cblum" {
-  label      = "cblum"
+resource "ibm_is_ssh_key" "terra_sshkey" {
+  name       = "terraform"
   public_key = var.ssh_public_key
 }
 
-resource "ibm_compute_bare_metal" "hourly-bm1" {
-  # Get values with "ibmcloud sl hardware create-options"
-  hostname             = "hourly-bm1"
-  domain               = "odf.ninja"
-  os_reference_code    = "REDHAT_8_64"
-  datacenter           = "fra02"
-  network_speed        = 100   # Optional
-  hourly_billing       = true  # Optional
-  private_network_only = false # Optional
-  fixed_config_preset  = "1U_8260_384GB_4X960GB_SSD_RAID10_RAID_10"
-  ssh_key_ids          = [ibm_compute_ssh_key.cblum.id]
+variable "instance_count" {
+  default = 1
+}
 
+resource "ibm_is_instance" "terra_instance" {
+  count = var.instance_count
+  name  = "terraformtest${count.index}"
+  # ibm-redhat-8-4-minimal-amd64-1
+  image = "r010-a704b088-c2ee-4f92-b384-1a0ac30f2f19"
+  # 4 CPUs, 16GB RAM, 150GB instance storage
+  profile = "bx2d-4x16"
 
-  user_metadata = "{\"value\":\"newvalue\"}" # Optional
-  tags = [
-    "cblum",
-    "testing",
-  ]
-  notes = "note test"
+  primary_network_interface {
+    # eu-de-default-vpc
+    subnet = "02c7-8b9b249c-27d0-418c-b2bb-dd014465c76e"
+  }
+
+  # eu-de-default-vpc
+  vpc  = "r010-dc43f1b5-68ac-4a40-aad5-10b4aed6de48"
+  zone = "eu-de-2"
+  keys = [ibm_is_ssh_key.terra_sshkey.id]
+}
+
+resource "ibm_is_floating_ip" "terra_fip" {
+  count  = var.instance_count
+  name   = "terratestfip${count.index}"
+  target = ibm_is_instance.terra_instance[count.index].primary_network_interface[0].id
 }
