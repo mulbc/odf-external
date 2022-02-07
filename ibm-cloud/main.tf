@@ -20,7 +20,7 @@ resource "ibm_is_ssh_key" "terra_sshkey" {
 }
 
 variable "instance_count" {
-  default = 1
+  default = 3
 }
 
 resource "ibm_is_instance" "terra_instance" {
@@ -46,4 +46,22 @@ resource "ibm_is_floating_ip" "terra_fip" {
   count  = var.instance_count
   name   = "terratestfip${count.index}"
   target = ibm_is_instance.terra_instance[count.index].primary_network_interface[0].id
+}
+
+resource "null_resource" "ansible" {
+  depends_on = [
+    ibm_is_instance.terra_instance,
+    ibm_is_floating_ip.terra_fip
+  ]
+  triggers = {
+    always_run = "${timestamp()}"
+  }
+  provisioner "local-exec" {
+
+    command = "ANSIBLE_HOST_KEY_CHECKING=False ansible-playbook -u root -i '${join(",", ibm_is_floating_ip.terra_fip[*].address)},' install-rhcs.yml"
+    environment = {
+      RHN_USER = var.rhn_user
+      RHN_PASS = var.rhn_password
+    }
+  }
 }
