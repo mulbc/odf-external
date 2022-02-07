@@ -110,10 +110,18 @@
         cmd: "ceph orch host add {{ hostvars[item]['ansible_facts']['hostname'] }} {{ hostvars[item]['ansible_facts']['default_ipv4']['address'] }} _admin mon osd rgw"
       run_once: true
       loop: "{{ play_hosts[1:] }}" # All except first node
-    # - name: Make all hosts an admin node
-    #   shell: "ceph orch host ls -f plain | tail -n+2 | cut -d ' ' -f1 | xargs -n1 -t -I {} ceph orch host label add {} _admin"
-    #   # delegate_to: "{{ play_hosts | first }}"
-    #   run_once: true
+    - name: Fetch the ceph.conf
+      run_once: yes
+      fetch: src=/etc/ceph/ceph.conf dest=buffer/ flat=yes
+    - name: Fetch the ceph.client.admin.keyring
+      run_once: yes
+      fetch: src=/etc/ceph/ceph.client.admin.keyring dest=buffer/ flat=yes
+    - name: Copy the ceph.conf to other nodes
+      copy: src=buffer/ceph.conf dest=/etc/ceph/
+      when: inventory_hostname != (play_hosts | first)
+    - name: Copy the ceph.client.admin.keyring to other nodes
+      copy: src=buffer/ceph.client.admin.keyring dest=/etc/ceph/
+      when: inventory_hostname != (play_hosts | first)
     - name: Identify all disks on all hosts
       tags: disk_testing
       shell: ceph orch device ls -f json
@@ -125,7 +133,7 @@
       set_fact:
         osd_candidates: "{{(osd_candidates_output['stdout'] | from_json) | json_query(select_local_disks_for_OSD) }}"
       vars:
-        select_local_disks_for_OSD: "[?addr=='{{ansible_hostname}}'] | [].devices[?sys_api.size>=`5000000000`][].[path][]"
+        select_local_disks_for_OSD: "[?addr=='{{ansible_hostname}}'] | [].devices[?!rejected_reasons][].[path][]"
     - name: Add OSDs
       tags: disk_testing
       shell:
