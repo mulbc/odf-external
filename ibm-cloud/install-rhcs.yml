@@ -2,28 +2,20 @@
   hosts: all
   remote_user: root
   tasks:
-    - name: Subscribe to pool with RHCS
-      tags: [rhsm]
-      redhat_subscription:
+    - name: Check if we are subscribed to IBM Satellite
+      lineinfile:
+        path: /etc/rhsm/rhsm.conf
+        line: "hostname = subscription.rhsm.redhat.com"
         state: present
-        server_hostname: https://subscription.rhn.redhat.com:443/subscription/
-        username: "{{ RHN_USER }}"
-        password: "{{ RHN_PASS }}"
-        force_register: True
-        rhsm_baseurl: https://cdn.redhat.com
-        # Employee SKU
-        pool_ids: 8a85f99c7d76f2fd017d96c345750657
-    - name: Enable only the repos we need
-      tags: [rhsm]
-      rhsm_repository:
-        purge: yes
-        name:
-          - ansible-2.9-for-rhel-8-x86_64-rpms
-          - rhceph-5-tools-for-rhel-8-x86_64-rpms
-          - rhel-8-for-x86_64-appstream-rpms
-          - rhel-8-for-x86_64-baseos-rpms
+      check_mode: yes
+      register: rhsm_conf_needs_change
+    - name: Unsubscribe from IBM Satellite
+      tags: rhsm
+      when: rhsm_conf_needs_change is changed
+      redhat_subscription:
+        state: absent
     - name: Revert RHSM IBM voodoo
-      tags: [rhsm]
+      tags: rhsm
       copy:
         dest: /etc/rhsm/rhsm.conf
         content: |
@@ -63,32 +55,79 @@
           auto_registration_interval = 60
           [logging]
           default_log_level = INFO
+    - name: Subscribe to pool with RHCS
+      tags: rhsm
+      when: rhsm_conf_needs_change is changed
+      redhat_subscription:
+        state: present
+        username: "{{ lookup('env', 'RHN_USER') }}"
+        password: "{{ lookup('env', 'RHN_PASS') }}"
+        force_register: True
+        # Employee SKU
+        pool_ids: 8a85f99c7d76f2fd017d96c345750657
+      register: register_rhsm
+      failed_when: register_rhsm.rc != 0 and 'has been registered' not in register_rhsm.stdout
+    - name: Enable only the repos we need
+      tags: rhsm
+      rhsm_repository:
+        purge: yes
+        name:
+          - ansible-2.9-for-rhel-8-x86_64-rpms
+          - rhceph-5-tools-for-rhel-8-x86_64-rpms
+          - rhel-8-for-x86_64-appstream-rpms
+          - rhel-8-for-x86_64-baseos-rpms
     - name: Install cephadm-ansible
       dnf:
         name: cephadm-ansible
         state: latest
+    - name: Check if cephadm is already installed
+      shell: command -v cephadm >/dev/null 2>&1
+      register: is_cephadm_installed
+      ignore_errors: yes
     - name: Prepare host for cephadm
+      when: is_cephadm_installed.rc != 0
       shell:
         cmd: 'ansible-playbook -i "localhost," cephadm-preflight.yml --extra-vars "ceph_origin=rhcs" --connection=local'
         chdir: /usr/share/cephadm-ansible
     - name: Bootstrap Ceph cluster
       shell:
-        cmd: "cephadm bootstrap --mon-ip {{ ansible_default_ipv4.address }} --registry-url registry.redhat.io --registry-username {{ RHN_USER }} --registry-password {{ RHN_PASS }}"
-      delegate_to: "{{ play_hosts | first }}"
-    - name: Make all hosts an admin node
-      shell: "ceph orch host ls -f plain | tail -n+2 | cut -d ' ' -f1 | xargs -n1 -t -I {} ceph orch host label add {} _admin"
+        cmd: "cephadm bootstrap --mon-ip {{ ansible_default_ipv4.address }} --registry-url registry.redhat.io --registry-username {{ lookup('env', 'RHN_USER') }} --registry-password {{ lookup('env', 'RHN_PASS') }}"
+      # delegate_to: "{{ play_hosts | first }}"
+      run_once: true
+      register: cephadm_bootstrap_result
+      failed_when: cephadm_bootstrap_result.rc != 0 and 'already exists' not in cephadm_bootstrap_result.stderr
+    - name: Get cephadm SSH key
+      run_once: true
+      command: ceph cephadm get-pub-key
+      register: cephadm_ssh_key
+    - name: Distribute cephadm ssh key
+      authorized_key:
+        user: root
+        state: present
+        key: "{{ cephadm_ssh_key.stdout }}"
+    - name: Add remaining hosts
+      shell:
+        cmd: "ceph orch host add {{ hostvars[item]['ansible_facts']['hostname'] }} {{ hostvars[item]['ansible_facts']['default_ipv4']['address'] }} _admin mon osd rgw"
+      run_once: true
+      loop: "{{ play_hosts[1:] }}" # All except first node
+    # - name: Make all hosts an admin node
+    #   shell: "ceph orch host ls -f plain | tail -n+2 | cut -d ' ' -f1 | xargs -n1 -t -I {} ceph orch host label add {} _admin"
+    #   # delegate_to: "{{ play_hosts | first }}"
+    #   run_once: true
     - name: Identify all disks on all hosts
+      tags: disk_testing
       shell: ceph orch device ls -f json
-      tags: testing
       register: osd_candidates_output
+      # delegate_to: "{{ play_hosts | first }}"
+      run_once: true
     - name: Filter too small devices
-      tags: testing
-      ansible.builtin.set_fact:
-        osd_candidates: "{{(osd_candidates_output['stdout'] | from_json) | json_query(select_localhost) }}"
+      tags: disk_testing
+      set_fact:
+        osd_candidates: "{{(osd_candidates_output['stdout'] | from_json) | json_query(select_local_disks_for_OSD) }}"
       vars:
-        select_localhost: "[?addr=='{{ansible_hostname}}'] | [].devices[?sys_api.size>=`5000000000`][].[path][]"
+        select_local_disks_for_OSD: "[?addr=='{{ansible_hostname}}'] | [].devices[?sys_api.size>=`5000000000`][].[path][]"
     - name: Add OSDs
-      tags: testing
+      tags: disk_testing
       shell:
         cmd: "ceph orch daemon add osd {{ansible_hostname}}:{{item}}"
       loop: "{{osd_candidates}}"
