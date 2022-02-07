@@ -92,7 +92,6 @@
     - name: Bootstrap Ceph cluster
       shell:
         cmd: "cephadm bootstrap --mon-ip {{ ansible_default_ipv4.address }} --registry-url registry.redhat.io --registry-username {{ lookup('env', 'RHN_USER') }} --registry-password {{ lookup('env', 'RHN_PASS') }}"
-      # delegate_to: "{{ play_hosts | first }}"
       run_once: true
       register: cephadm_bootstrap_result
       failed_when: cephadm_bootstrap_result.rc != 0 and 'already exists' not in cephadm_bootstrap_result.stderr
@@ -126,7 +125,6 @@
       tags: disk_testing
       shell: ceph orch device ls -f json
       register: osd_candidates_output
-      # delegate_to: "{{ play_hosts | first }}"
       run_once: true
     - name: Filter too small devices
       tags: disk_testing
