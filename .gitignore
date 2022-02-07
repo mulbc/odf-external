@@ -3,3 +3,4 @@ ibm-cloud/terraform.tfvars
 ibm-cloud/.terraform.*
 ibm-cloud/.terraform
 ibm-cloud/terraform.tfstate.backup
+ibm-cloud/buffer
